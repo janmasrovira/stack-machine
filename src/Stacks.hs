@@ -41,37 +41,37 @@ data Stacks m a where
 
 makeSem ''Stacks
 
-re :: (Members '[Error Text] r) => Sem (Stacks ': r) a -> Sem (BinTree ': r) a
+re :: (Members '[Error Text] r) => Sem (Stacks ': r) a -> Sem (BinTree Value ': r) a
 re = reinterpret $ \case
   NewStack -> newStack'
   PopStack i -> popStack' i
   PushStack i v -> pushStack' i v
   ReadValue p -> readValue' p
-  TraceTree -> BinTree.traceTree
+  TraceTree -> BinTree.traceTree (show @Value)
 
-readValue' :: (Members '[Error Text, BinTree] r) => Path -> Sem r Value
+readValue' :: (Members '[Error Text, BinTree Value] r) => Path -> Sem r Value
 readValue' = getNode
 
-pushStack' :: (Members '[Error Text, BinTree] r) => StackId -> Value -> Sem r Path
+pushStack' :: (Members '[Error Text, BinTree Value] r) => StackId -> Value -> Sem r Path
 pushStack' s t = do
   pos <- nextPath s
   setNode_ pos t
   overNode (stackRoot s) incr
   return pos
 
-popStack' :: (Members '[Error Text, BinTree] r) => StackId -> Sem r Value
+popStack' :: (Members '[Error Text, BinTree Value] r) => StackId -> Sem r Value
 popStack' s = do
   tp <- topPath s
   res <- fromMaybeM (throw @Text "pop invalid path") (popNode tp)
   overNode (stackRoot s) decr
   return res
 
-nextPath :: (Members '[Error Text, BinTree] r) => StackId -> Sem r Path
+nextPath :: (Members '[Error Text, BinTree Value] r) => StackId -> Sem r Path
 nextPath s = do
   n <- getStackSize s
   return (relativeToStackNat s n)
 
-topPath :: (Members '[Error Text, BinTree] r) => StackId -> Sem r Path
+topPath :: (Members '[Error Text, BinTree Value] r) => StackId -> Sem r Path
 topPath s = do
   n <- getStackSize s
   when (n == 0) (throw @Text "empty stack")
@@ -83,7 +83,7 @@ relativeToStackNat sid p = relativeToStack sid (replicate p R)
 relativeToStack :: StackId -> Path -> Path
 relativeToStack sid p = stackRoot sid ++ [R] ++ p
 
-newStack' :: (Members '[Error Text, BinTree] r) => Sem r StackId
+newStack' :: (Members '[Error Text, BinTree Value] r) => Sem r StackId
 newStack' = do
   num <- getNumStacks
   setNode_ rootPath (ValueNat (succ num))
@@ -91,17 +91,17 @@ newStack' = do
   setNode_ newStackRoot (ValueNat 0)
   return num
 
-getNat :: (Members '[Error Text, BinTree] r) => Path -> Sem r Natural
+getNat :: (Members '[Error Text, BinTree Value] r) => Path -> Sem r Natural
 getNat p = do
   v <- getNode p
   case v of
     ValueNat n -> return n
     _ -> impossible
 
-getStackSize :: (Members '[Error Text, BinTree] r) => StackId -> Sem r Natural
+getStackSize :: (Members '[Error Text, BinTree Value] r) => StackId -> Sem r Natural
 getStackSize = getNat . stackRoot
 
-getNumStacks :: (Members '[Error Text, BinTree] r) => Sem r Natural
+getNumStacks :: (Members '[Error Text, BinTree Value] r) => Sem r Natural
 getNumStacks = getNat rootPath
 
 stackRoot :: StackId -> Path
