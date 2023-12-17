@@ -1,0 +1,6 @@
+cradle:
+  cabal:
+    - path: "./src"
+      component: "lib:asm2nockma"
+    - path: "./app"
+      component: "exe:asm2nockma"
