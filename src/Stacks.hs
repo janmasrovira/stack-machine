@@ -96,7 +96,6 @@ getNat p = do
   v <- getNode p
   case v of
     ValueNat n -> return n
-    _ -> impossible
 
 getStackSize :: (Members '[Error Text, BinTree Value] r) => StackId -> Sem r Natural
 getStackSize = getNat . stackRoot

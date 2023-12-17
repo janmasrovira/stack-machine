@@ -1,8 +1,8 @@
 module BinTree
   ( module Value,
+    module Path,
     BinTree,
     Direction (..),
-    Path,
     lookupNode,
     getNode,
     adjustNode,
@@ -20,13 +20,7 @@ where
 import Base
 import Data.Tree qualified as Tree
 import Value
-
-data Direction
-  = L
-  | R
-  deriving stock (Eq, Show)
-
-type Path = [Direction]
+import Path
 
 data NodeTree a = NodeTree
   { _treeLeft :: Tree a,
