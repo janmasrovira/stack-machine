@@ -24,14 +24,14 @@ data StackOp
 
 data MemoryOp
   = MemoryRead
-  | MemoryWrite Natural
+  | MemoryWrite
   deriving stock (Show)
 
 data Instruction
   = InstructionOp Op
   | InstructionStack StackOp
-  | -- | InstructionBranch BranchOp
-    InstructionMemory MemoryOp
+  --- | InstructionBranch BranchOp
+  --- | InstructionMemory MemoryOp
   deriving stock (Show)
 
 newtype EncodedPath = EncodedPath
@@ -41,8 +41,10 @@ newtype EncodedPath = EncodedPath
 data Compiler m a where
   Push :: Natural -> Compiler m ()
   BinOp :: Op -> Compiler m ()
-  Read :: Compiler m ()
-  Write :: Compiler m ()
+  -- Alloc :: Compiler m Pointer
+  -- stack [pointer, ..] => [*pointer, ..]
+  -- Read :: Compiler m ()
+  -- Write :: Compiler m Pointer
 
 data StackId
   = StackMemory

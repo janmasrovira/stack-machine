@@ -15,7 +15,7 @@ type StackId = Natural
 The binary tree encoding of the stacks machine has the following shape:
                          numStacks
                       /            \
-                  stack1Size       progStack
+                  stack1Size       empty
                   /         \
             stack2Size     bottomStack1
              /     \        /   \
