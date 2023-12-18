@@ -28,44 +28,57 @@ data MemoryOp
   deriving stock (Show)
 
 data Instruction
-  =
-  InstructionOp Op
+  = InstructionOp Op
   | InstructionStack StackOp
-  -- | InstructionBranch BranchOp
-  | InstructionMemory MemoryOp
+  | -- | InstructionBranch BranchOp
+    InstructionMemory MemoryOp
   deriving stock (Show)
+
+newtype EncodedPath = EncodedPath
+  { _encodedPath :: Natural
+  }
 
 data Compiler m a where
   Push :: Natural -> Compiler m ()
   BinOp :: Op -> Compiler m ()
   Read :: Compiler m ()
-  -- | stack = [path, val, ..]
   Write :: Compiler m ()
 
-data StackId =
-  StackMemory
+data StackId
+  = StackMemory
   | StackMain
+  | StackProgram
   deriving stock (Enum, Bounded)
 
 makeSem ''Compiler
+makeLenses ''EncodedPath
 
-encodePath :: Path -> Natural
+instance Semigroup EncodedPath where
+  a <> b = encodePath (decodePath a <> decodePath b)
+
+instance Monoid EncodedPath where
+  mempty = encodePath []
+
+decodePath :: EncodedPath -> Path
+decodePath = undefined
+
+encodePath :: Path -> EncodedPath
 encodePath = undefined
 
-readPath :: Members '[Compiler] r => Path -> Sem r ()
+readPath :: (Members '[Compiler] r) => Path -> Sem r ()
 readPath p = do
-  push (encodePath p)
+  push (encodePath p ^. encodedPath)
   read
 
-writePath :: Members '[Compiler] r => Path -> Sem r ()
+writePath :: (Members '[Compiler] r) => Path -> Sem r ()
 writePath p = do
-  push (encodePath p)
+  push (encodePath p ^. encodedPath)
   write
 
-writeConst :: Members '[Compiler] r => Path -> Natural -> Sem r ()
+writeConst :: (Members '[Compiler] r) => Path -> Natural -> Sem r ()
 writeConst p c = push c >> writePath p
 
-initializeStacks :: Members '[Compiler] r => Sem r ()
+initializeStacks :: (Members '[Compiler] r) => Sem r ()
 initializeStacks = forM_ allElements $ \sid -> do
   writeConst (stackRoot sid) 0
 
