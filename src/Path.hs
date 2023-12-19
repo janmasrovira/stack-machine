@@ -1,10 +1,4 @@
-module Path where
+module Path
+  (module Juvix.Compiler.Nockma.Language) where
 
-import Base
-
-data Direction
-  = L
-  | R
-  deriving stock (Eq, Show)
-
-type Path = [Direction]
+import Juvix.Compiler.Nockma.Language (Path, Direction(..))

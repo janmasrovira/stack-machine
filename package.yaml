@@ -24,6 +24,7 @@ dependencies:
   - text == 2.0.*
   - transformers == 0.5.*
   - unordered-containers == 0.2.*
+  - juvix
 
 ghc-options:
   # Warnings

@@ -5,6 +5,10 @@ import Path
 import Stacks (Stacks)
 import Stacks qualified
 import Value
+import Juvix.Compiler.Nockma.Language
+import Juvix.Compiler.Nockma.Pretty
+import Juvix.Compiler.Nockma.Evaluator.Error
+import Juvix.Compiler.Nockma.Evaluator
 
 type Prenock = [Instruction]
 
@@ -19,10 +23,15 @@ data StackOp
   | StackPop
   deriving stock (Show)
 
--- data BranchOp
---   = BranchGoto ProgramLoc
---   | BranchCond ProgramLoc ProgramLoc
---   deriving stock (Show)
+data BranchCondIte = BranchCondIte {
+  _branchCondIteTrue :: [Instruction],
+  _branchCondIteFalse :: [Instruction]
+  }
+ deriving stock (Show)
+
+newtype BranchOp
+  = BranchCond BranchCondIte
+  deriving stock (Show)
 
 data MemoryOp
   = MemoryRead
@@ -32,17 +41,16 @@ data MemoryOp
 data Instruction
   = InstructionOp Op
   | InstructionStack StackOp
-  --- | InstructionBranch BranchOp
+  | InstructionBranch BranchOp
   --- | InstructionMemory MemoryOp
   deriving stock (Show)
 
-newtype EncodedPath = EncodedPath
-  { _encodedPath :: Natural
-  }
-
 data Compiler m a where
   Push :: Natural -> Compiler m ()
-  BinOp :: Op -> Compiler m ()
+  Pop :: Compiler m ()
+  Increment :: Compiler m ()
+  Branch :: m () -> m () -> Compiler m ()
+  -- BinOp :: Op -> Compiler m ()
 
 -- Alloc :: Compiler m Pointer
 -- stack [pointer, ..] => [*pointer, ..]
@@ -56,7 +64,56 @@ data StackId
   deriving stock (Enum, Bounded)
 
 makeSem ''Compiler
-makeLenses ''EncodedPath
+
+seqTerms :: [Term Natural] -> Term Natural
+seqTerms = foldl' step (OpAddress # emptyPath) . reverse
+  where
+    step :: Term Natural -> Term Natural -> Term Natural
+    step acc t = OpSequence # t # acc
+
+runCompiledNock :: (MonadIO m) => Sem '[Compiler] () -> m ()
+runCompiledNock s = do
+  let t = run (execCompiler s)
+      stack = (0 :: Natural) # (0 :: Natural)
+      evalT =  run
+            . runError @(ErrNockNatural Natural)
+            . runError @NockEvalError $ eval stack t
+  case evalT of
+    Left e -> error (show e)
+    Right ev -> case ev of
+      Left e -> error (show e)
+      Right res -> putStrLn (ppTrace res)
+
+execCompiler :: Sem (Compiler ': r) a -> Sem r (Term Natural)
+execCompiler = fmap fst . runCompiler
+
+runCompiler :: Sem (Compiler ': r) a -> Sem r (Term Natural, a)
+runCompiler sem = do
+  (ts, a) <- runOutputList (re sem)
+  return (seqTerms ts, a)
+
+serializeCompiler :: Sem '[Compiler] () -> [Instruction]
+serializeCompiler = run . execOutputList . reInstruction
+
+reInstruction :: Sem (Compiler ': r) a -> Sem (Output Instruction ': r) a
+reInstruction = reinterpretH $ \case
+  Push n -> output (InstructionStack (StackPush n)) >>= pureT
+  Pop -> output (InstructionStack StackPop) >>= pureT
+  Increment -> output (InstructionOp Incr) >>= pureT
+
+re :: Sem (Compiler ': r) a -> Sem (Output (Term Natural) ': r) a
+re = reinterpretH $ \case
+  Push n -> output (OpPush # (OpQuote # n) # (OpAddress # emptyPath)) >>= pureT
+  Pop -> output (OpAddress # [R]) >>= pureT
+  Increment -> output ((OpInc # (OpAddress # [L])) # (OpAddress # [R])) >>= pureT
+  Branch t f -> do
+    termT <- runT t
+    termF <- runT f
+    let termT' = execCompiler termT
+    let termF' = execCompiler termF
+    _
+    -- output (OpIf # [R]) >>= pureT
+    -- bindTSimple output termT
 
 runNock :: [Instruction] -> IO (Either Text Natural)
 runNock = fmap (fmap (^. valueNat)) . runM . runError . Stacks.runStacks . runProgram
@@ -73,14 +130,14 @@ runNock = fmap (fmap (^. valueNat)) . runM . runError . Stacks.runStacks . runPr
       let incrementPc :: Sem r' ()
           incrementPc = do
             ValueNat pc :: Value <- Stacks.readValue pcPath
-            pc' :: Path <- Stacks.nextPath (decodePath (EncodedPath pc))
+            pc' :: Path <- Stacks.nextPath (decodePath' (EncodedPath pc))
             Stacks.popStack pcStackId
             void (Stacks.pushStack pcStackId (ValueNat (encodePath pc' ^. encodedPath)))
 
           interpretLoop :: Sem r' ()
           interpretLoop = do
             ValueNat pc :: Value <- Stacks.readValue pcPath
-            let curPc = decodePath (EncodedPath pc)
+            let curPc = decodePath' (EncodedPath pc)
             whenM (decodeBool <$> Stacks.pathExists curPc) $ do
               i <- decodeInstruction <$> Stacks.readValue curPc
               case i of
@@ -90,21 +147,24 @@ runNock = fmap (fmap (^. valueNat)) . runM . runError . Stacks.runStacks . runPr
                 InstructionStack sop -> case sop of
                   StackPop -> void (Stacks.popStack valueStackId)
                   StackPush n -> void (Stacks.pushStack valueStackId (ValueNat n))
+                InstructionBranch b -> undefined
               incrementPc
               interpretLoop
       interpretLoop
       Stacks.popStack valueStackId
 
+prog1 :: Sem '[Compiler] ()
+prog1 = do
+  push 13
+  increment
+  push 50
+  pop
+
 prog :: [Instruction]
-prog = [
-  InstructionStack (StackPush 13),
-  InstructionOp Incr,
-  InstructionStack (StackPush 50),
-  InstructionStack StackPop
-       ]
+prog = serializeCompiler prog1
 
 instance Semigroup EncodedPath where
-  a <> b = encodePath (decodePath a <> decodePath b)
+  a <> b = encodePath (decodePath' a <> decodePath' b)
 
 instance Monoid EncodedPath where
   mempty = encodePath []
@@ -134,29 +194,6 @@ decodeInstruction (ValueNat n)
  | n == incrOpCode = InstructionOp Incr
  | n >= pushOpCode = InstructionStack (StackPush (n - pushOpCode))
  | otherwise = error "bad encoding of instruction"
-
-decodePath :: EncodedPath -> Path
-decodePath ep = run (execOutputList (go (ep ^. encodedPath)))
-  where
-    go :: Natural -> Sem (Output Direction ': r) ()
-    go = \case
-      0 -> error "encoded path cannot be 0"
-      1 -> return ()
-      x
-        | even x -> do
-            go (x `div` 2)
-            output L
-        | otherwise -> do
-            go ((x - 1) `div` 2)
-            output R
-
-encodePath :: Path -> EncodedPath
-encodePath = EncodedPath . foldl' step 1
-  where
-    step :: Natural -> Direction -> Natural
-    step n = \case
-      R -> 2 * n + 1
-      L -> 2 * n
 
 readPath :: (Members '[Compiler] r) => Path -> Sem r ()
 readPath p = do

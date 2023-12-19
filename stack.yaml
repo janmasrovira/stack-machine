@@ -1,1 +1,11 @@
 resolver: lts-21.7
+
+packages:
+  - .
+  - juvix
+extra-deps:
+  - aeson-better-errors-0.9.1.1
+
+allow-newer: true
+allow-newer-deps:
+  - aeson-better-errors
