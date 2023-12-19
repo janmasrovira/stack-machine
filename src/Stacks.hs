@@ -36,7 +36,11 @@ data Stacks m a where
   NewStack :: Stacks m StackId
   PopStack :: StackId -> Stacks m Value
   PushStack :: StackId -> Value -> Stacks m Path
+  PathExists :: Path -> Stacks m Value
+  -- | Returns the path to the next free node of a stack
+  StackBottomPath :: StackId -> Stacks m Path
   ReadValue :: Path -> Stacks m Value
+  NextPath :: Path -> Stacks m Path
   TraceTree :: Stacks m ()
 
 makeSem ''Stacks
@@ -45,16 +49,25 @@ re :: (Members '[Error Text] r) => Sem (Stacks ': r) a -> Sem (BinTree Value ': 
 re = reinterpret $ \case
   NewStack -> newStack'
   PopStack i -> popStack' i
+  PathExists i -> pathExists' i
   PushStack i v -> pushStack' i v
+  StackBottomPath i -> return (bottomStackPath i)
   ReadValue p -> readValue' p
+  NextPath p -> nextPath' p
   TraceTree -> BinTree.traceTree (show @Value)
 
 readValue' :: (Members '[Error Text, BinTree Value] r) => Path -> Sem r Value
 readValue' = getNode
 
+nextPath' :: (Monad m) => Path -> m Path
+nextPath' p = return (p ++ [R])
+
+pathExists' :: (Members '[BinTree Value] r) => Path -> Sem r Value
+pathExists' t = encodeBool . isJust <$> lookupNode @Value t
+
 pushStack' :: (Members '[Error Text, BinTree Value] r) => StackId -> Value -> Sem r Path
 pushStack' s t = do
-  pos <- nextPath s
+  pos <- nextFreePath s
   setNode_ pos t
   overNode (stackRoot s) incr
   return pos
@@ -66,8 +79,8 @@ popStack' s = do
   overNode (stackRoot s) decr
   return res
 
-nextPath :: (Members '[Error Text, BinTree Value] r) => StackId -> Sem r Path
-nextPath s = do
+nextFreePath :: (Members '[Error Text, BinTree Value] r) => StackId -> Sem r Path
+nextFreePath s = do
   n <- getStackSize s
   return (relativeToStackNat s n)
 
@@ -80,8 +93,11 @@ topPath s = do
 relativeToStackNat :: StackId -> Natural -> Path
 relativeToStackNat sid p = relativeToStack sid (replicate p R)
 
+bottomStackPath :: StackId -> Path
+bottomStackPath sid = stackRoot sid ++ [R]
+
 relativeToStack :: StackId -> Path -> Path
-relativeToStack sid p = stackRoot sid ++ [R] ++ p
+relativeToStack sid p = bottomStackPath sid ++ p
 
 newStack' :: (Members '[Error Text, BinTree Value] r) => Sem r StackId
 newStack' = do
@@ -121,6 +137,8 @@ ex = runM . runTextErrorIO . runStacks $ x
       pushStack s1 (ValueNat 101)
       pushStack s1 (ValueNat 102)
       v3 <- pushStack s1 (ValueNat 103)
+      v4 <- nextPath v3
+      pushStack s1 (ValueNat 104)
       pushStack s2 (ValueNat 201)
       pushStack s2 (ValueNat 202)
       v <- popStack s2
@@ -128,5 +146,7 @@ ex = runM . runTextErrorIO . runStacks $ x
       putStrLn ("v3 = " <> show v3)
       traceTree
       v3' <- readValue v3
+      v4' <- readValue v4
       putStrLn ("*v3 = " <> show v3')
+      putStrLn ("*v4 = " <> show v4')
       putStrLn "end"

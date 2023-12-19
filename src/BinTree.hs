@@ -83,15 +83,14 @@ traceTree' :: forall r t. (Members '[State (Tree t), Embed IO] r) => (t -> Text)
 traceTree' shw =
   get >>= \case
     TreeLeaf -> putStrLn "<empty tree>"
-    TreeNode n -> putStrLn (pack (Tree.drawTree (unpack . shw <$> goNode n)))
+    TreeNode n -> putStrLn (pack (Tree.drawTree (unpack <$> goNode (shw <$> n))))
   where
-    goNode :: NodeTree t -> Tree.Tree t
-    goNode n = Tree.Node (n ^. treeValue) (mapMaybe toTree [n ^. treeLeft, n ^. treeRight])
-
-    toTree :: Tree t -> Maybe (Tree.Tree t)
-    toTree = \case
-      TreeLeaf -> Nothing
-      TreeNode n -> Just (goNode n)
+    goNode :: NodeTree Text -> Tree.Tree Text
+    goNode n = Tree.Node (n ^. treeValue) $ case (n ^. treeLeft, n ^. treeRight) of
+      (TreeLeaf, TreeLeaf) -> []
+      (TreeNode l, TreeLeaf) -> [goNode l, Tree.Node "<right>" []]
+      (TreeLeaf, TreeNode r) -> [Tree.Node "<left>" [], goNode r]
+      (TreeNode l, TreeNode r) -> [goNode l, goNode r]
 
 lookupNode' :: forall t r. (Members '[Error Text, State (Tree t)] r) => Path -> Sem r (Maybe t)
 lookupNode' p = do
