@@ -1,14 +1,12 @@
 module Prenock where
 
 import Base
-import Path
+import Juvix.Compiler.Nockma.Evaluator
+import Juvix.Compiler.Nockma.Language
+import Juvix.Compiler.Nockma.Pretty
 import Stacks (Stacks)
 import Stacks qualified
 import Value
-import Juvix.Compiler.Nockma.Language
-import Juvix.Compiler.Nockma.Pretty
-import Juvix.Compiler.Nockma.Evaluator.Error
-import Juvix.Compiler.Nockma.Evaluator
 
 type Prenock = [Instruction]
 
@@ -23,11 +21,11 @@ data StackOp
   | StackPop
   deriving stock (Show)
 
-data BranchCondIte = BranchCondIte {
-  _branchCondIteTrue :: [Instruction],
-  _branchCondIteFalse :: [Instruction]
+data BranchCondIte = BranchCondIte
+  { _branchCondIteTrue :: [Instruction],
+    _branchCondIteFalse :: [Instruction]
   }
- deriving stock (Show)
+  deriving stock (Show)
 
 newtype BranchOp
   = BranchCond BranchCondIte
@@ -50,7 +48,8 @@ data Compiler m a where
   Pop :: Compiler m ()
   Increment :: Compiler m ()
   Branch :: m () -> m () -> Compiler m ()
-  -- BinOp :: Op -> Compiler m ()
+
+-- BinOp :: Op -> Compiler m ()
 
 -- Alloc :: Compiler m Pointer
 -- stack [pointer, ..] => [*pointer, ..]
@@ -75,9 +74,11 @@ runCompiledNock :: (MonadIO m) => Sem '[Compiler] () -> m ()
 runCompiledNock s = do
   let t = run (execCompiler s)
       stack = (0 :: Natural) # (0 :: Natural)
-      evalT =  run
-            . runError @(ErrNockNatural Natural)
-            . runError @NockEvalError $ eval stack t
+      evalT =
+        run
+          . runError @(ErrNockNatural Natural)
+          . runError @NockEvalError
+          $ eval stack t
   case evalT of
     Left e -> error (show e)
     Right ev -> case ev of
@@ -101,19 +102,17 @@ reInstruction = reinterpretH $ \case
   Pop -> output (InstructionStack StackPop) >>= pureT
   Increment -> output (InstructionOp Incr) >>= pureT
 
+-- -> output (InstructionOp Incr) >>= pureT
+
 re :: Sem (Compiler ': r) a -> Sem (Output (Term Natural) ': r) a
 re = reinterpretH $ \case
   Push n -> output (OpPush # (OpQuote # n) # (OpAddress # emptyPath)) >>= pureT
   Pop -> output (OpAddress # [R]) >>= pureT
   Increment -> output ((OpInc # (OpAddress # [L])) # (OpAddress # [R])) >>= pureT
   Branch t f -> do
-    termT <- runT t
-    termF <- runT f
-    let termT' = execCompiler termT
-    let termF' = execCompiler termF
-    _
-    -- output (OpIf # [R]) >>= pureT
-    -- bindTSimple output termT
+    termT <- runT t >>= raise . execCompiler . (pop >>)
+    termF <- runT f >>= raise . execCompiler . (pop >>)
+    output (OpIf # (OpAddress # [L]) # termT # termF) >>= pureT
 
 runNock :: [Instruction] -> IO (Either Text Natural)
 runNock = fmap (fmap (^. valueNat)) . runM . runError . Stacks.runStacks . runProgram
@@ -159,6 +158,8 @@ prog1 = do
   increment
   push 50
   pop
+  push 1
+  branch (push 99) (push 77)
 
 prog :: [Instruction]
 prog = serializeCompiler prog1
@@ -182,30 +183,33 @@ pushOpCode :: Natural
 pushOpCode = magicBase + 2
 
 encodeInstruction :: Instruction -> Value
-encodeInstruction = ValueNat . \case
-  InstructionOp Incr -> incrOpCode
-  InstructionStack s -> case s of
-    StackPop -> popOpCode
-    StackPush n -> pushOpCode + n
+encodeInstruction =
+  ValueNat . \case
+    InstructionOp Incr -> incrOpCode
+    InstructionStack s -> case s of
+      StackPop -> popOpCode
+      StackPush n -> pushOpCode + n
 
 decodeInstruction :: Value -> Instruction
 decodeInstruction (ValueNat n)
- | n == popOpCode = InstructionStack StackPop
- | n == incrOpCode = InstructionOp Incr
- | n >= pushOpCode = InstructionStack (StackPush (n - pushOpCode))
- | otherwise = error "bad encoding of instruction"
+  | n == popOpCode = InstructionStack StackPop
+  | n == incrOpCode = InstructionOp Incr
+  | n >= pushOpCode = InstructionStack (StackPush (n - pushOpCode))
+  | otherwise = error "bad encoding of instruction"
 
 readPath :: (Members '[Compiler] r) => Path -> Sem r ()
 readPath p = do
   push (encodePath p ^. encodedPath)
   undefined
-  -- read
+
+-- read
 
 writePath :: (Members '[Compiler] r) => Path -> Sem r ()
 writePath p = do
   push (encodePath p ^. encodedPath)
   undefined
-  -- write
+
+-- write
 
 writeConst :: (Members '[Compiler] r) => Path -> Natural -> Sem r ()
 writeConst p c = push c >> writePath p
