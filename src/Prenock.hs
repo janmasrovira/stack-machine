@@ -16,6 +16,17 @@ data Op
   = Incr
   deriving stock (Show)
 
+data StackName
+  = ValueStack
+  | CallStack
+  | TempStack
+  | FunctionsLibrary
+  | StandardLibrary
+  deriving stock (Enum, Bounded, Eq, Show)
+
+numStacks :: (Integral a) => a
+numStacks = fromIntegral (length (allElements @StackName))
+
 data StackOp
   = StackPush Natural
   | StackPop
@@ -44,10 +55,23 @@ data Instruction
   deriving stock (Show)
 
 data Compiler m a where
-  Push :: Natural -> Compiler m ()
-  Pop :: Compiler m ()
-  Increment :: Compiler m ()
+  Push :: StackName -> Natural -> Compiler m ()
+  Pop :: StackName -> Compiler m ()
+  Increment :: StackName -> Compiler m ()
   Branch :: m () -> m () -> Compiler m ()
+
+-- | The path to the head of a named stack
+stackPath :: StackName -> Path
+stackPath s = replicate (fromIntegral (fromEnum s)) R ++ finalPath
+  where
+    finalPath :: Path
+    finalPath
+      | fromEnum s == numStacks - 1 = []
+      | otherwise = [L]
+
+-- | Construct a path rooted at he head of a named stack
+pathInStack :: StackName -> Path -> Path
+pathInStack s p = stackPath s ++ p
 
 -- BinOp :: Op -> Compiler m ()
 
@@ -73,7 +97,7 @@ seqTerms = foldl' step (OpAddress # emptyPath) . reverse
 runCompiledNock :: (MonadIO m) => Sem '[Compiler] () -> m ()
 runCompiledNock s = do
   let t = run (execCompiler s)
-      stack = (0 :: Natural) # (0 :: Natural)
+      stack = foldr1 (#) (reverse (replicate numStacks (toNock (0 :: Natural))))
       evalT =
         run
           . runError @(ErrNockNatural Natural)
@@ -98,21 +122,67 @@ serializeCompiler = run . execOutputList . reInstruction
 
 reInstruction :: Sem (Compiler ': r) a -> Sem (Output Instruction ': r) a
 reInstruction = reinterpretH $ \case
-  Push n -> output (InstructionStack (StackPush n)) >>= pureT
-  Pop -> output (InstructionStack StackPop) >>= pureT
-  Increment -> output (InstructionOp Incr) >>= pureT
-
--- -> output (InstructionOp Incr) >>= pureT
+  Push _ n -> output (InstructionStack (StackPush n)) >>= pureT
+  Pop _ -> output (InstructionStack StackPop) >>= pureT
+  Increment _ -> output (InstructionOp Incr) >>= pureT
 
 re :: Sem (Compiler ': r) a -> Sem (Output (Term Natural) ': r) a
 re = reinterpretH $ \case
-  Push n -> output (OpPush # (OpQuote # n) # (OpAddress # emptyPath)) >>= pureT
-  Pop -> output (OpAddress # [R]) >>= pureT
-  Increment -> output ((OpInc # (OpAddress # [L])) # (OpAddress # [R])) >>= pureT
+  Push s n -> output (pushOnStack s (OpQuote # n)) >>= pureT
+  Pop s -> output (popStack s) >>= pureT
+  Increment s ->
+    output
+      ( replaceOnStack
+          s
+          (OpInc # (OpAddress # pathInStack s [L]))
+      )
+      >>= pureT
   Branch t f -> do
-    termT <- runT t >>= raise . execCompiler . (pop >>)
-    termF <- runT f >>= raise . execCompiler . (pop >>)
-    output (OpIf # (OpAddress # [L]) # termT # termF) >>= pureT
+    termT <- runT t >>= raise . execCompiler . (pop ValueStack >>)
+    termF <- runT f >>= raise . execCompiler . (pop ValueStack >>)
+    output (OpIf # (OpAddress # pathInStack ValueStack [L]) # termT # termF) >>= pureT
+  where
+    pushOnStack :: StackName -> Term Natural -> Term Natural
+    pushOnStack s t = OpPush # t # topStack s
+
+    replaceOnStack :: StackName -> Term Natural -> Term Natural
+    replaceOnStack s t = OpPush # t # replaceTopStack s
+
+    popStack :: StackName -> Term Natural
+    popStack sn =
+      foldr1
+        (#)
+        [ let p = stackPath s
+              a
+                | sn == s = p ++ [R]
+                | otherwise = p
+           in OpAddress # a
+          | s <- allElements
+        ]
+
+    -- Reconstruct the value-stack / call-stack cell by moving the global head to the
+    -- respective stack head.
+    topStack :: StackName -> Term Natural
+    topStack sn =
+      foldr1
+        (#)
+        [ let p = OpAddress # (R : stackPath s)
+            in if
+                | sn == s -> (OpAddress # [L]) # p
+                | otherwise -> p
+          | s <- allElements
+        ]
+
+    replaceTopStack :: StackName -> Term Natural
+    replaceTopStack sn =
+      foldr1
+        (#)
+        [ let p = R : stackPath s
+           in if
+                | sn == s -> (OpAddress # [L]) # (OpAddress # (p ++ [R]))
+                | otherwise -> OpAddress # p
+          | s <- allElements
+        ]
 
 runNock :: [Instruction] -> IO (Either Text Natural)
 runNock = fmap (fmap (^. valueNat)) . runM . runError . Stacks.runStacks . runProgram
@@ -154,12 +224,21 @@ runNock = fmap (fmap (^. valueNat)) . runM . runError . Stacks.runStacks . runPr
 
 prog1 :: Sem '[Compiler] ()
 prog1 = do
-  push 13
-  increment
-  push 50
-  pop
-  push 1
-  branch (push 99) (push 77)
+  push ValueStack 13
+  push TempStack 20
+  push CallStack 666
+  increment CallStack
+  push ValueStack 13
+  increment CallStack
+  pop ValueStack
+  push ValueStack 50
+  push CallStack 33
+  push CallStack 44
+  pop CallStack
+  pop ValueStack
+  increment CallStack
+  push ValueStack 0
+  branch (push ValueStack 99) (push ValueStack 77)
 
 prog :: [Instruction]
 prog = serializeCompiler prog1
@@ -199,20 +278,18 @@ decodeInstruction (ValueNat n)
 
 readPath :: (Members '[Compiler] r) => Path -> Sem r ()
 readPath p = do
-  push (encodePath p ^. encodedPath)
   undefined
 
 -- read
 
 writePath :: (Members '[Compiler] r) => Path -> Sem r ()
 writePath p = do
-  push (encodePath p ^. encodedPath)
   undefined
 
 -- write
 
 writeConst :: (Members '[Compiler] r) => Path -> Natural -> Sem r ()
-writeConst p c = push c >> writePath p
+writeConst p c = undefined
 
 initializeStacks :: (Members '[Compiler] r) => Sem r ()
 initializeStacks = forM_ allElements $ \sid -> do
