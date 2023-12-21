@@ -105,8 +105,19 @@ indexInStack s idx = stackPath s ++ indexStack idx
 --   6. Replace the value stack with the stack in 1
 --   7. Pop the call stack
 
-funIncrement :: Term Natural
-funIncrement = (OpInc # (OpAddress # [R, L])) # ((0 :: Natural) # (0 :: Natural))
+--- call a function: t′ ∗t′|ρ => t''
+--- 1. setup environment (t').
+---    i. copy the global stack
+---    ii. copy the function from function library, write in the argumetns from the value stack
+--     iii. add the copied/modified function to the environment at position ρ
+--- 2. Use the call combinator
+--- 3. Extract result from t'' and push to the existing value stack
+
+--- [code nil]
+
+--- [arg1, .... argn, nil] extract from value stack
+--- replace the tail of [code nil] with [arg{n+1} argn ... arg1 nil]
+
 
 -- | Construct a path rooted at he head of a named stack
 pathInStack :: StackName -> Path -> Path
@@ -126,6 +137,9 @@ data StackId
   deriving stock (Enum, Bounded)
 
 makeSem ''Compiler
+
+funIncrement :: Term Natural
+funIncrement = (OpInc # (OpAddress # [R, L])) # nockNil'
 
 seqTerms :: [Term Natural] -> Term Natural
 seqTerms = foldl' step (OpAddress # emptyPath) . reverse
@@ -161,7 +175,7 @@ functions = [("increment", funIncrement), ("lala", toNock (1 :: Natural))]
 functionLocations :: HashMap Text Path
 functionLocations =
   hashMap
-    [ (n, pathInStack FunctionsLibrary (replicate i R))
+    [ (n, indexInStack FunctionsLibrary i)
       | (i, (n, _)) <- zip [0 ..] functions
     ]
 
@@ -208,16 +222,14 @@ re = reinterpretH $ \case
   Call funName funArgsNum -> do
     funPath <- fromJust <$> asks @(HashMap Text Path) (^. at funName)
     -- outputT (pushOnStack CallStack (OpAddress # pathInStack ValueStack (replicate funArgsNum R)))
+
+    outputT (pushOnStack ValueStack (remakeList [OpAddress # pathInStack ValueStack [L]]))
+    -- outputT (pushOnStack ValueStack (OpAddress # funPath))
+
     outputT (pushOnStack ValueStack
-              (OpAddress # funPath)
-             --(OpQuote #
-
-              -- (OpReplace # (([R, L] # (OpAddress # pathInStack ValueStack [L])) # (OpAddress # funPath)))
-
-             --)
-
-            )
-    -- outputT (pushOnStack ValueStack (OpReplace # (([R, L] # (OpAddress # pathInStack ValueStack [L])) # OpAddress # funPath)))
+              (OpReplace #
+                   (([R] # remakeList [OpAddress # pathInStack ValueStack [L]]) #
+                    OpAddress # funPath)))
 
 
     ----- stack: [[h stuff] .... [.... [code args]] ...]
@@ -328,7 +340,7 @@ prog1 = do
   pushNat ValueStack 111
   pushNat ValueStack 222
   pushNat ValueStack 333
-  --call "increment" 1
+  call "increment" 1
   -- push FunctionsLibrary funIncrement
   -- pushNat ValueStack 13
   -- pushNat TempStack 20
@@ -343,8 +355,8 @@ prog1 = do
   -- pop CallStack
   -- pop ValueStack
   -- increment CallStack
-  pushNat ValueStack 0
-  branch (pushNat ValueStack 99) (pushNat ValueStack 77)
+  -- pushNat ValueStack 0
+  -- branch (pushNat ValueStack 99) (pushNat ValueStack 77)
 
 initProg :: Sem '[Compiler] ()
 initProg = do
