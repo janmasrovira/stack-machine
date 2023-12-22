@@ -4,6 +4,7 @@ import Base
 import Juvix.Compiler.Nockma.Evaluator
 import Juvix.Compiler.Nockma.Language
 import Juvix.Compiler.Nockma.Pretty
+import Juvix.Compiler.Nockma.Translation.FromSource (stdlib)
 
 type Prenock = [Instruction]
 
@@ -14,7 +15,8 @@ data Op
   deriving stock (Show)
 
 data StackName
-  = ValueStack
+  = CurrentFunction
+  | ValueStack
   | CallStack
   | TempStack
   | FunctionsLibrary
@@ -70,6 +72,9 @@ indexInPath p idx = p ++ indexStack idx
 
 indexInStack :: StackName -> Natural -> Path
 indexInStack s idx = stackPath s ++ indexStack idx
+
+pathToArg :: Natural -> Path
+pathToArg = indexInPath (indexInStack CurrentFunction 0 ++ [R])
 
 --- [ code [0 0] ]
 --- [8 [9 ADDR STDLIB_ADDR] [9 2 [10 [6 ARGS] [0 2]]]]
@@ -141,6 +146,7 @@ makeSem ''Compiler
 funIncrement :: Term Natural
 funIncrement = (OpInc # (OpAddress # [R, L])) # nockNil'
 
+
 seqTerms :: [Term Natural] -> Term Natural
 seqTerms = foldl' step (OpAddress # emptyPath) . reverse
   where
@@ -163,14 +169,15 @@ initStack defs = makeList (initSubStack <$> allElements)
   where
     initSubStack :: StackName -> Term Natural
     initSubStack = \case
+      CurrentFunction -> nockNil'
       ValueStack -> nockNil'
       CallStack -> nockNil'
       TempStack -> nockNil'
-      StandardLibrary -> nockNil'
+      StandardLibrary -> stdlib
       FunctionsLibrary -> makeList defs
 
 functions :: [(Text, Term Natural)]
-functions = [("increment", funIncrement), ("lala", toNock (1 :: Natural))]
+functions = [("increment", funIncrement'), ("lala", toNock (1 :: Natural))]
 
 functionLocations :: HashMap Text Path
 functionLocations =
@@ -178,6 +185,13 @@ functionLocations =
     [ (n, indexInStack FunctionsLibrary i)
       | (i, (n, _)) <- zip [0 ..] functions
     ]
+
+--  OpPush # t # topStack s
+funIncrement' :: Term Natural
+funIncrement' = funCode # nockNil'
+  where
+    funCode :: Term Natural
+    funCode = OpPush # (OpInc # (OpAddress # pathToArg 0)) # topStack ValueStack
 
 runCompiledNock :: (MonadIO m) => Sem '[Compiler, Reader (HashMap Text Path)] () -> m ()
 runCompiledNock s = do
@@ -215,36 +229,75 @@ reInstruction = reinterpretH $ \case
   Pop _ -> output (InstructionStack StackPop) >>= pureT
   Increment _ -> output (InstructionOp Incr) >>= pureT
 
+
 re :: (Member (Reader (HashMap Text Path)) r) => Sem (Compiler ': r) a -> Sem (Output (Term Natural) ': r) a
 re = reinterpretH $ \case
   Push s n -> outputT (pushOnStack s (OpQuote # n))
   Pop s -> outputT (popStack 1 s)
-  Call funName funArgsNum -> do
+  Call funName funArgsNum -> (pureT =<<) $ do
     funPath <- fromJust <$> asks @(HashMap Text Path) (^. at funName)
-    -- outputT (pushOnStack CallStack (OpAddress # pathInStack ValueStack (replicate funArgsNum R)))
 
-    outputT (pushOnStack ValueStack (remakeList [OpAddress # pathInStack ValueStack [L]]))
-    -- outputT (pushOnStack ValueStack (OpAddress # funPath))
+    -- Save the current state of the value stack
+    output (pushOnStack CallStack (OpAddress # pathInStack ValueStack (replicate funArgsNum R)))
 
-    outputT (pushOnStack ValueStack
+    -- Setup function to call with it arguments
+    output (pushOnStack CurrentFunction
               (OpReplace #
                    (([R] # remakeList [OpAddress # pathInStack ValueStack [L]]) #
                     OpAddress # funPath)))
 
+    -- Init 'activation frame'
+    output (resetStack ValueStack)
 
-    ----- stack: [[h stuff] .... [.... [code args]] ...]
-    ----
+    -- call the function
+    output (OpCall # ((indexInStack CurrentFunction 0 ++ [L]) # (OpAddress # emptyPath)))
+
+    -- compilation of ASM Return
+    output (replaceStack ValueStack ((OpAddress # (indexInStack ValueStack 0)) # ((OpAddress # (indexInStack CallStack 0)))))
+    -- discard the 'activation' frame
+    output (popStack 1 CallStack)
+    output (popStack 1 CurrentFunction)
+
+  Increment _ -> (pureT =<<) $ do
+    -- [8 [9 ADDR STDLIB_ADDR] [9 2 [10 [6 ARGS] [0 2]]]]
+    -- [push [call ADDR [@ STDLIB_ADDR]] [call L [replace [RL ARGS] [@ L]]]]
+
+-- [8
+--   [9 F 0 1]        ::  not necessarily [0 1], just somewhere f can be found, if it's a value this could even not be a 9
+--   [9 2             ::  eval formula @ 2 of the following
+--     [10 [6         ::  edit at axis 6
+--          [7 [0 3]  ::  evaluate the a formula in the original context without f on it
+--           a]]      ::  the formula giving a goes here
+--      0 2]          ::  this whole 10 is editing what's at axis 2, i.e. what the 8 just pushed
+--   ]
+-- ]
+--- [dec 111]
+--- [add [111 222 nil]]
+
+    -- call to add:
+    let decodeFn = OpCall # (decodePath' (EncodedPath 4) # (OpAddress # stackPath StandardLibrary))
+        arguments = OpSequence # (OpAddress # [R]) # ((OpAddress # indexInStack ValueStack 0) # (OpAddress # indexInStack ValueStack 1))
+        extractResult = (OpAddress # [L]) # (OpAddress # [R,R])
+        callFn = OpPush # (OpCall # [L] # (OpReplace # ([R, L] # arguments) # (OpAddress # [L]))) # extractResult
+
+    output (OpPush # decodeFn # callFn)
+    output (replaceTopStack ValueStack)
+
+    -- call to decrement:
+    -- let decodeFn = OpCall # (decodePath' (EncodedPath 342) # (OpAddress # stackPath StandardLibrary))
+    --     argument = OpSequence # (OpAddress # [R]) # (OpAddress # indexInStack ValueStack 0)
+    --     extractResult = (OpAddress # [L]) # (OpAddress # [R,R])
+    --     callFn = OpPush # (OpCall # [L] # (OpReplace # ([R, L] # argument) # (OpAddress # [L]))) # extractResult
+    -- output (OpPush # decodeFn # callFn)
+    -- output (replaceTopStack ValueStack)
 
 
-    --- [code [h args]]
-    -- outputT (pushOnStack ValueStack (OpAddress # funPath))
-
-  Increment s ->
-    outputT
-      ( replaceOnStack
-          s
-          (OpInc # (OpAddress # pathInStack s [L]))
-      )
+    -- increment:
+    -- outputT
+    --   ( replaceOnStack
+    --       s
+    --       (OpInc # (OpAddress # pathInStack s [L]))
+    --   )
   Branch t f -> do
     termT <- runT t >>= raise . execCompiler . (pop ValueStack >>)
     termF <- runT f >>= raise . execCompiler . (pop ValueStack >>)
@@ -253,46 +306,58 @@ re = reinterpretH $ \case
     outputT :: (Functor f, Member (Output (Term Natural)) r) => Term Natural -> Sem (WithTactics e f m r) (f ())
     outputT = pureT <=< output
 
-    pushOnStack :: StackName -> Term Natural -> Term Natural
-    pushOnStack s t = OpPush # t # topStack s
+pushOnStack :: StackName -> Term Natural -> Term Natural
+pushOnStack s t = OpPush # t # topStack s
 
-    replaceOnStack :: StackName -> Term Natural -> Term Natural
-    replaceOnStack s t = OpPush # t # replaceTopStack s
+replaceOnStack :: StackName -> Term Natural -> Term Natural
+replaceOnStack s t = OpPush # t # replaceTopStack s
 
-    popStack :: Natural -> StackName -> Term Natural
-    popStack n sn =
-      remakeList
-        [ let p = stackPath s
-              a
-                | sn == s = p ++ replicate n R
-                | otherwise = p
-           in OpAddress # a
-          | s <- allElements
-        ]
+popStack :: Natural -> StackName -> Term Natural
+popStack n sn =
+  remakeList
+    [ let p = stackPath s
+          a
+            | sn == s = p ++ replicate n R
+            | otherwise = p
+        in OpAddress # a
+      | s <- allElements
+    ]
 
-    -- Reconstruct the value-stack / call-stack cell by moving the global head to the
-    -- respective stack head.
-    --- [h [s1 s1 s3 nil]]
-    --- [ s1 .. [h si] ... sn nil]
-    topStack :: StackName -> Term Natural
-    topStack sn =
-      remakeList
-        [ let p = OpAddress # (R : stackPath s)
-           in if
-                | sn == s -> (OpAddress # [L]) # p
-                | otherwise -> p
-          | s <- allElements
-        ]
+replaceStack :: StackName -> Term Natural -> Term Natural
+replaceStack sn t =
+  remakeList
+    [ if
+            | sn == s -> t
+            | otherwise -> OpAddress # (stackPath s)
+      | s <- allElements
+    ]
 
-    replaceTopStack :: StackName -> Term Natural
-    replaceTopStack sn =
-      remakeList
-        [ let p = R : stackPath s
-           in if
-                | sn == s -> (OpAddress # [L]) # (OpAddress # (p ++ [R]))
-                | otherwise -> OpAddress # p
-          | s <- allElements
-        ]
+resetStack :: StackName -> Term Natural
+resetStack sn = replaceStack sn (OpQuote # nockNil')
+
+-- Reconstruct the value-stack / call-stack cell by moving the global head to the
+-- respective stack head.
+--- [h [s1 s1 s3 nil]]
+--- [ s1 .. [h si] ... sn nil]
+topStack :: StackName -> Term Natural
+topStack sn =
+  remakeList
+    [ let p = OpAddress # (R : stackPath s)
+        in if
+            | sn == s -> (OpAddress # [L]) # p
+            | otherwise -> p
+      | s <- allElements
+    ]
+
+replaceTopStack :: StackName -> Term Natural
+replaceTopStack sn =
+  remakeList
+    [ let p = R : stackPath s
+        in if
+            | sn == s -> (OpAddress # [L]) # (OpAddress # (p ++ [R]))
+            | otherwise -> OpAddress # p
+      | s <- allElements
+    ]
 
 -- runNock :: [Instruction] -> IO (Either Text Natural)
 -- runNock = fmap (fmap (^. valueNat)) . runM . runError . Stacks.runStacks . runProgram
@@ -337,10 +402,15 @@ pushNat s n = push s (toNock n)
 
 prog1 :: Sem '[Compiler, Reader (HashMap Text Path)] ()
 prog1 = do
-  pushNat ValueStack 111
-  pushNat ValueStack 222
-  pushNat ValueStack 333
-  call "increment" 1
+  pushNat ValueStack 2
+  pushNat ValueStack 3
+  increment ValueStack
+  -- pushNat ValueStack 111
+  -- pushNat ValueStack 222
+  -- pushNat ValueStack 333
+  -- call "increment" 1
+  -- pushNat ValueStack 444
+  -- call "increment" 1
   -- push FunctionsLibrary funIncrement
   -- pushNat ValueStack 13
   -- pushNat TempStack 20
