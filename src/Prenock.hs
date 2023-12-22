@@ -39,6 +39,7 @@ data Compiler m a where
   Increment :: StackName -> Compiler m ()
   Branch :: m () -> m () -> Compiler m ()
   CallStdlib :: StdlibFunction -> Compiler m ()
+  AsmReturn :: Compiler m ()
 
 -- | The path to the head of a named stack
 stackPath :: StackName -> Path
@@ -98,14 +99,17 @@ initStack defs = makeList (initSubStack <$> allElements)
       StandardLibrary -> stdlib
       FunctionsLibrary -> makeList defs
 
-functions :: [(Text, Term Natural)]
-functions = [("increment", funIncrement'), ("lala", toNock (1 :: Natural))]
+compileFunctions :: [(Text, Sem '[Compiler, Reader (HashMap Text Path)] ())]
+compileFunctions = [("increment", compileFunIncrement), ("const", compileFunConst), ("callInc", compileCallInc)]
+
+functions :: [Term Natural]
+functions = (# nockNil') <$> run (runReader functionLocations (mapM execCompiler (snd <$> compileFunctions)))
 
 functionLocations :: HashMap Text Path
 functionLocations =
   hashMap
     [ (n, indexInStack FunctionsLibrary i)
-      | (i, (n, _)) <- zip [0 ..] functions
+      | (i, (n, _)) <- zip [0 ..] compileFunctions
     ]
 
 funIncrement' :: Term Natural
@@ -114,6 +118,28 @@ funIncrement' = funCode # nockNil'
     funCode :: Term Natural
     funCode = OpPush # (OpInc # (OpAddress # pathToArg 0)) # topStack ValueStack
 
+compileFunIncrement :: Sem '[Compiler, Reader (HashMap Text Path)] ()
+compileFunIncrement = do
+  push ValueStack (OpInc # (OpAddress # pathToArg 0))
+  asmReturn
+
+funConst :: Term Natural
+funConst = funCode # nockNil'
+  where
+    funCode :: Term Natural
+    funCode = OpPush # (OpAddress # pathToArg 0) # topStack ValueStack
+
+compileFunConst :: Sem '[Compiler, Reader (HashMap Text Path)] ()
+compileFunConst = do
+  push ValueStack (OpAddress # pathToArg 0)
+  asmReturn
+
+compileCallInc :: Sem '[Compiler, Reader (HashMap Text Path)] ()
+compileCallInc = do
+  push ValueStack (OpAddress # pathToArg 0)
+  call "increment" 1
+  asmReturn
+
 runCompiledNock :: (MonadIO m) => Sem '[Compiler, Reader (HashMap Text Path)] () -> m ()
 runCompiledNock s = do
   let t =
@@ -121,7 +147,7 @@ runCompiledNock s = do
           . runReader functionLocations
           . execCompiler
           $ s
-      stack = initStack (snd <$> functions)
+      stack = initStack functions
       evalT =
         run
           . runError @(ErrNockNatural Natural)
@@ -171,7 +197,7 @@ re = reinterpretH $ \case
     output (pushOnStack CurrentFunction
               (OpReplace #
                    -- TODO: copy funArgs elements from the value stack
-                   (([R] # remakeList [OpAddress # pathInStack ValueStack [L]]) #
+                   (([R] # stackTake ValueStack funArgsNum) #
                     OpAddress # funPath)))
 
     -- Init 'activation frame'
@@ -179,12 +205,6 @@ re = reinterpretH $ \case
 
     -- call the function
     output (OpCall # ((indexInStack CurrentFunction 0 ++ [L]) # (OpAddress # emptyPath)))
-
-    -- compilation of ASM Return
-    output (replaceStack ValueStack ((OpAddress # (indexInStack ValueStack 0)) # ((OpAddress # (indexInStack CallStack 0)))))
-    -- discard the 'activation' frame
-    output (popStack 1 CallStack)
-    output (popStack 1 CurrentFunction)
 
   Increment s -> (pureT =<<) $ do
     output
@@ -207,14 +227,22 @@ re = reinterpretH $ \case
 
     output (OpPush # decodeFn # callFn)
     output (replaceTopStack ValueStack)
-
     where
       stdlibStackTake :: StackName -> Natural -> Term Natural
       stdlibStackTake sn n = foldr1 (#) (take (fromIntegral n) [OpAddress # indexInStack sn i | i <- [0..]])
 
+  AsmReturn -> (pureT =<<) $ do
+    output (replaceStack ValueStack ((OpAddress # (indexInStack ValueStack 0)) # ((OpAddress # (indexInStack CallStack 0)))))
+    -- discard the 'activation' frame
+    output (popStack 1 CallStack)
+    output (popStack 1 CurrentFunction)
+
   where
     outputT :: (Functor f, Member (Output (Term Natural)) r) => Term Natural -> Sem (WithTactics e f m r) (f ())
     outputT = pureT <=< output
+
+stackTake :: StackName -> Natural -> Term Natural
+stackTake sn n = remakeList (take (fromIntegral n) [OpAddress # indexInStack sn i | i <- [0..]])
 
 pushOnStack :: StackName -> Term Natural -> Term Natural
 pushOnStack s t = OpPush # t # topStack s
@@ -270,15 +298,19 @@ replaceTopStack sn =
     ]
 
 pushNat :: (Member Compiler r) => StackName -> Natural -> Sem r ()
-pushNat s n = push s (toNock n)
+pushNat s n = push s (OpQuote # toNock n)
 
 prog1 :: Sem '[Compiler, Reader (HashMap Text Path)] ()
 prog1 = do
   pushNat ValueStack 2
   pushNat ValueStack 3
   increment ValueStack
-  callStdlib StdlibDec
-  callStdlib StdlibAdd
+  -- callStdlib StdlibDec
+  -- callStdlib StdlibAdd
+  call "increment" 1
+  -- call "increment" 1
+  call "const" 2
+  call "callInc" 1
   -- pushNat ValueStack 111
   -- pushNat ValueStack 222
   -- pushNat ValueStack 333
